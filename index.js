@@ -1,5 +1,5 @@
 import { Client } from '@xmtp/xmtp-js';
-import { ethers } from 'ethers'; // Встроено в xmtp-js, но для ясности
+import { ethers } from 'ethers';
 
 // Функция для создания клиента из env
 async function createClient() {
@@ -8,9 +8,10 @@ async function createClient() {
     throw new Error('XMTP_WALLET_KEY не установлен в env');
   }
 
-  // Создаём провайдера и кошелёк (для dev/production)
+  // Используем Alchemy Sepolia для dev
   const env = process.env.XMTP_ENV || 'dev';
-  const rpcUrl = env === 'production' ? 'https://mainnet.infura.io/v3/YOUR_INFURA_KEY' : 'https://sepolia.infura.io/v3/YOUR_INFURA_KEY'; // Замени на свой Infura (бесплатно на infura.io)
+  const rpcUrl = 'https://eth-sepolia.g.alchemy.com/v2/mRihUxWF22AZILcoI3b3V';
+
   const provider = new ethers.JsonRpcProvider(rpcUrl);
 
   // Парсим приватный ключ (добавляем 0x если нужно)
@@ -23,7 +24,7 @@ async function createClient() {
   // Устанавливаем ключи шифрования для хранилища (локальная БД для сообщений)
   const encryptionKey = process.env.XMTP_DB_ENCRYPTION_KEY;
   if (encryptionKey) {
-    xmtp.setEncryptionKey(encryptionKey); // Для постоянства в Render (SQLite-like)
+    xmtp.setEncryptionKey(encryptionKey); // Для постоянства в Render
   }
 
   return xmtp;
@@ -35,9 +36,10 @@ async function startAgent() {
     const xmtp = await createClient();
     console.log(`Агент запущен! Адрес: ${xmtp.address}`);
     console.log(`Среда: ${process.env.XMTP_ENV || 'dev'}`);
+    console.log(`RPC: Alchemy Sepolia`);
 
     // Слушаем новые сообщения
-    xmtp.conversations.stream().addListener(async (conversation) => {
+    for await (const conversation of xmtp.conversations.stream()) {
       for await (const message of conversation.streamMessages()) {
         const incomingMessage = message.content.toString().toLowerCase();
         let reply;
@@ -52,7 +54,7 @@ async function startAgent() {
         await conversation.send(reply);
         console.log(`Отправлен ответ: ${reply}`);
       }
-    });
+    }
 
     // Держим процесс живым (для Render)
     process.on('SIGINT', () => {
