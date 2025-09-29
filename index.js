@@ -1,103 +1,39 @@
-import { Client } from '@xmtp/node-sdk';
-import { ethers } from 'ethers';
-import { getRandomValues } from 'node:crypto';
+import { Agent } from '@xmtp/agent-sdk';
+import { getTestUrl } from '@xmtp/agent-sdk/debug';
 
-// Создаём signer для V3 (EOA с приватным ключом)
-function createSigner(privateKey, provider) {
-  const wallet = new ethers.Wallet(privateKey, provider);
-  return {
-    type: 'EOA',
-    getIdentifier: () => ({
-      identifier: wallet.address,
-      identifierKind: 'Ethereum', // Или используй константу, если есть в SDK
-    }),
-    signMessage: async (message) => {
-      const signature = await wallet.signMessage(message);
-      return ethers.getBytes(signature); // Возвращаем Uint8Array для V3
-    },
-  };
-}
+// Создаем агента с настройками окружения
+const agent = await Agent.createFromEnv({
+  env: 'dev', // используем dev окружение для Sepolia Testnet
+});
 
-// Функция для создания клиента V3
-async function createClient() {
-  const walletKey = process.env.XMTP_WALLET_KEY;
-  if (!walletKey) {
-    throw new Error('XMTP_WALLET_KEY не установлен в env');
-  }
-
-  // RPC для Sepolia
-  const rpcUrl = 'https://eth-sepolia.g.alchemy.com/v2/mRihUxWF22AZILcoI3b3V';
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
-
-  // Парсим приватный ключ
-  const privateKey = walletKey.startsWith('0x') ? walletKey : '0x' + walletKey;
-
-  // Создаём signer
-  const signer = createSigner(privateKey, provider);
-
-  // Генерируем или используем dbEncryptionKey из env (для V3)
-  let dbEncryptionKey;
-  const envKey = process.env.XMTP_DB_ENCRYPTION_KEY;
-  if (envKey) {
-    // Конвертируем hex-строку из env в Uint8Array
-    dbEncryptionKey = ethers.getBytes(envKey);
+// Обрабатываем текстовые сообщения
+agent.on('text', async (ctx) => {
+  const message = ctx.message.content.toLowerCase().trim();
+  
+  // Простая логика ответа
+  if (message.includes('привет') || message.includes('hello')) {
+    await ctx.sendText('👋 Привет! Я простой XMTP агент. Напиши мне что-нибудь!');
+  } else if (message.includes('как дела') || message.includes('how are you')) {
+    await ctx.sendText('Отлично работаю! Спасибо, что спросил 😊');
+  } else if (message.includes('помощь') || message.includes('help')) {
+    await ctx.sendText('Я могу отвечать на твои сообщения. Просто напиши мне что-нибудь!');
   } else {
-    // Генерируем случайный (минимум 32 байта)
-    dbEncryptionKey = getRandomValues(new Uint8Array(32));
-    console.log('Сгенерирован новый dbEncryptionKey. Сохрани его в env для постоянства!');
+    await ctx.sendText(`Ты написал: "${ctx.message.content}"\n\nЯ получил твое сообщение! 👍`);
   }
+});
 
-  // Env для dev (Sepolia)
-  const env = process.env.XMTP_ENV || 'dev';
+// Логируем запуск агента
+agent.on('start', () => {
+  console.log('🚀 XMTP Agent запущен!');
+  console.log(`📬 Адрес агента: ${agent.address}`);
+  console.log(`🔗 Тестовая ссылка: ${getTestUrl(agent.client)}`);
+  console.log('⏳ Ожидаю сообщений...');
+});
 
-  // Создаём клиент V3
-  const client = await Client.create(signer, { 
-    dbEncryptionKey,
-    env 
-  });
+// Обработка ошибок
+agent.on('error', (error) => {
+  console.error('❌ Ошибка агента:', error);
+});
 
-  return client;
-}
-
-// Основная функция агента
-async function startAgent() {
-  try {
-    const client = await createClient();
-    console.log(`Агент запущен в V3! Адрес: ${client.address}`);
-    console.log(`Среда: ${process.env.XMTP_ENV || 'dev'}`);
-    console.log(`RPC: Alchemy Sepolia`);
-
-    // Слушаем новые входящие разговоры и сообщения (V3 стиль)
-    for await (const conversation of client.conversations.streamIncoming()) {
-      console.log(`Новый разговор с: ${conversation.peerAddress}`);
-      for await (const message of conversation.streamMessages()) {
-        const incomingMessage = message.content.toString().toLowerCase();
-        let reply;
-
-        if (incomingMessage.includes('как дела') || incomingMessage.includes('how are you')) {
-          reply = 'У меня всё отлично! А у тебя?';
-        } else {
-          reply = `Я услышал: ${message.content.toString()}. Расскажи больше!`;
-        }
-
-        // Отправляем ответ (V3)
-        await conversation.send(reply);
-        console.log(`Отправлен ответ: ${reply}`);
-      }
-    }
-
-    // Держим процесс живым (для Render)
-    process.on('SIGINT', () => {
-      console.log('Остановка агента...');
-      client.logout();
-      process.exit(0);
-    });
-
-  } catch (error) {
-    console.error('Ошибка запуска агента:', error.message);
-    process.exit(1);
-  }
-}
-
-// Запуск
-startAgent();
+// Запускаем агента
+await agent.start();
