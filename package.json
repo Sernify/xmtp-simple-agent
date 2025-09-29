@@ -8,7 +8,8 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@xmtp/xmtp-js": "13.0.4"
+    "@xmtp/xmtp-js": "13.0.4",
+    "ethers": "6.13.2"
   },
   "engines": {
     "node": ">=18.0.0"
