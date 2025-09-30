@@ -2,42 +2,59 @@ import { Agent } from '@xmtp/agent-sdk';
 import { getTestUrl } from '@xmtp/agent-sdk/debug';
 import { ethers } from 'ethers';
 
+// API ключи
+const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY || 'mRihUxWF22AZILcoI3b3V';
+
 // Конфигурация поддерживаемых сетей
 const NETWORKS = {
+  sepolia: {
+    name: 'Sepolia Testnet',
+    rpc: `https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}`,
+    explorer: 'https://sepolia.etherscan.io',
+    chainId: 11155111,
+    nativeCurrency: 'ETH'
+  },
   ethereum: {
     name: 'Ethereum',
-    rpc: 'https://eth.llamarpc.com',
-    explorer: 'https://etherscan.io'
-  },
-  sepolia: {
-    name: 'Sepolia',
-    rpc: process.env.ALCHEMY_RPC_URL || 'https://eth-sepolia.g.alchemy.com/v2/demo',
-    explorer: 'https://sepolia.etherscan.io'
+    rpc: `https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`,
+    explorer: 'https://etherscan.io',
+    chainId: 1,
+    nativeCurrency: 'ETH'
   },
   polygon: {
     name: 'Polygon',
-    rpc: 'https://polygon-rpc.com',
-    explorer: 'https://polygonscan.com'
+    rpc: `https://polygon-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`,
+    explorer: 'https://polygonscan.com',
+    chainId: 137,
+    nativeCurrency: 'MATIC'
   },
   arbitrum: {
     name: 'Arbitrum',
-    rpc: 'https://arb1.arbitrum.io/rpc',
-    explorer: 'https://arbiscan.io'
+    rpc: `https://arb-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`,
+    explorer: 'https://arbiscan.io',
+    chainId: 42161,
+    nativeCurrency: 'ETH'
   },
   optimism: {
     name: 'Optimism',
-    rpc: 'https://mainnet.optimism.io',
-    explorer: 'https://optimistic.etherscan.io'
+    rpc: `https://opt-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`,
+    explorer: 'https://optimistic.etherscan.io',
+    chainId: 10,
+    nativeCurrency: 'ETH'
   },
   base: {
     name: 'Base',
-    rpc: 'https://mainnet.base.org',
-    explorer: 'https://basescan.org'
+    rpc: `https://base-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`,
+    explorer: 'https://basescan.org',
+    chainId: 8453,
+    nativeCurrency: 'ETH'
   }
 };
 
-// Хранилище данных пользователей
+// Хранилище данных
 const userData = new Map();
+const monitoringIntervals = new Map();
+let agentInstance = null;
 
 // Инициализация провайдеров
 const providers = {};
@@ -45,114 +62,168 @@ for (const [key, config] of Object.entries(NETWORKS)) {
   providers[key] = new ethers.JsonRpcProvider(config.rpc);
 }
 
-// Функция для получения данных пользователя
 function getUserData(address) {
   if (!userData.has(address)) {
     userData.set(address, {
       wallets: [],
       transactions: [],
-      monitoring: false
+      monitoring: false,
+      lastCheckedBlock: {},
+      conversationAddress: address
     });
   }
   return userData.get(address);
 }
 
-// Функция проверки валидности адреса
 function isValidAddress(address) {
   return ethers.isAddress(address);
 }
 
-// Функция получения баланса
-async function getBalance(address, network) {
+// Получение истории транзакций через Alchemy API
+async function fetchTransactionHistory(walletAddress, network) {
   try {
     const provider = providers[network];
-    const balance = await provider.getBalance(address);
-    return ethers.formatEther(balance);
-  } catch (error) {
-    console.error(`Ошибка получения баланса для ${network}:`, error);
-    return '0';
-  }
-}
-
-// Функция получения последних транзакций (упрощенная версия)
-async function getRecentTransactions(address, network) {
-  try {
-    const provider = providers[network];
+    const config = NETWORKS[network];
+    
+    console.log(`📡 Получаю историю транзакций для ${walletAddress} в ${network}...`);
+    
+    // Используем Alchemy API для получения истории
     const currentBlock = await provider.getBlockNumber();
+    const fromBlock = Math.max(0, currentBlock - 10000); // Последние 10000 блоков
+    
     const transactions = [];
     
-    // Проверяем последние 10 блоков
-    for (let i = 0; i < 10; i++) {
-      const block = await provider.getBlock(currentBlock - i, true);
-      if (!block || !block.transactions) continue;
+    // Получаем транзакции отправленные С этого адреса
+    const sentTxs = await provider.send('alchemy_getAssetTransfers', [{
+      fromBlock: `0x${fromBlock.toString(16)}`,
+      toBlock: 'latest',
+      fromAddress: walletAddress,
+      category: ['external', 'internal'],
+      withMetadata: true,
+      excludeZeroValue: false
+    }]);
+    
+    // Получаем транзакции полученные НА этот адрес
+    const receivedTxs = await provider.send('alchemy_getAssetTransfers', [{
+      fromBlock: `0x${fromBlock.toString(16)}`,
+      toBlock: 'latest',
+      toAddress: walletAddress,
+      category: ['external', 'internal'],
+      withMetadata: true,
+      excludeZeroValue: false
+    }]);
+    
+    // Обрабатываем отправленные транзакции
+    for (const tx of sentTxs.transfers || []) {
+      const receipt = await provider.getTransactionReceipt(tx.hash);
+      const transaction = await provider.getTransaction(tx.hash);
       
-      for (const tx of block.transactions) {
-        if (tx.from?.toLowerCase() === address.toLowerCase() ||
-            tx.to?.toLowerCase() === address.toLowerCase()) {
-          transactions.push({
-            hash: tx.hash,
-            from: tx.from,
-            to: tx.to,
-            value: ethers.formatEther(tx.value || 0),
-            gasPrice: tx.gasPrice ? ethers.formatUnits(tx.gasPrice, 'gwei') : '0',
-            network: network,
-            timestamp: block.timestamp,
-            type: tx.from?.toLowerCase() === address.toLowerCase() ? 'sent' : 'received'
-          });
-        }
+      if (receipt && transaction) {
+        const gasUsed = receipt.gasUsed;
+        const gasPrice = transaction.gasPrice || 0n;
+        const fee = ethers.formatEther(gasUsed * gasPrice);
+        const block = await provider.getBlock(receipt.blockNumber);
+        
+        transactions.push({
+          hash: tx.hash,
+          from: tx.from,
+          to: tx.to,
+          value: tx.value || '0',
+          fee: fee,
+          network: network,
+          networkName: config.name,
+          timestamp: block ? block.timestamp * 1000 : Date.now(),
+          blockNumber: receipt.blockNumber,
+          type: 'sent',
+          currency: config.nativeCurrency
+        });
       }
     }
     
+    // Обрабатываем полученные транзакции
+    for (const tx of receivedTxs.transfers || []) {
+      const receipt = await provider.getTransactionReceipt(tx.hash);
+      const transaction = await provider.getTransaction(tx.hash);
+      
+      if (receipt && transaction) {
+        const gasUsed = receipt.gasUsed;
+        const gasPrice = transaction.gasPrice || 0n;
+        const fee = ethers.formatEther(gasUsed * gasPrice);
+        const block = await provider.getBlock(receipt.blockNumber);
+        
+        transactions.push({
+          hash: tx.hash,
+          from: tx.from,
+          to: tx.to,
+          value: tx.value || '0',
+          fee: fee,
+          network: network,
+          networkName: config.name,
+          timestamp: block ? block.timestamp * 1000 : Date.now(),
+          blockNumber: receipt.blockNumber,
+          type: 'received',
+          currency: config.nativeCurrency
+        });
+      }
+    }
+    
+    console.log(`✅ Найдено ${transactions.length} транзакций в ${network}`);
     return transactions;
+    
   } catch (error) {
-    console.error(`Ошибка получения транзакций для ${network}:`, error);
+    console.error(`❌ Ошибка получения истории для ${network}:`, error.message);
     return [];
   }
 }
 
-// Функция расчета комиссии транзакции
-async function getTransactionFee(txHash, network) {
-  try {
-    const provider = providers[network];
-    const receipt = await provider.getTransactionReceipt(txHash);
-    if (!receipt) return '0';
-    
-    const gasUsed = receipt.gasUsed;
-    const tx = await provider.getTransaction(txHash);
-    const gasPrice = tx.gasPrice || 0n;
-    
-    const fee = gasUsed * gasPrice;
-    return ethers.formatEther(fee);
-  } catch (error) {
-    console.error(`Ошибка расчета комиссии:`, error);
-    return '0';
-  }
-}
-
-// Функция мониторинга кошельков
-async function monitorWallet(address, network, agent, userAddress) {
+// Мониторинг новых транзакций в реальном времени
+async function monitorWalletRealtime(walletAddress, network, userAddress) {
   const user = getUserData(userAddress);
+  const provider = providers[network];
+  const config = NETWORKS[network];
   
   try {
-    const provider = providers[network];
-    let lastBlock = await provider.getBlockNumber();
+    // Инициализируем последний проверенный блок
+    if (!user.lastCheckedBlock[network]) {
+      user.lastCheckedBlock[network] = await provider.getBlockNumber();
+    }
     
-    const checkInterval = setInterval(async () => {
+    console.log(`🔍 Запущен мониторинг ${walletAddress} в ${network}`);
+    
+    // Проверяем новые блоки каждые 12 секунд
+    const intervalId = setInterval(async () => {
       try {
         const currentBlock = await provider.getBlockNumber();
+        const lastChecked = user.lastCheckedBlock[network];
         
-        if (currentBlock > lastBlock) {
-          for (let i = lastBlock + 1; i <= currentBlock; i++) {
-            const block = await provider.getBlock(i, true);
+        if (currentBlock > lastChecked) {
+          console.log(`🔎 Проверяю блоки ${lastChecked + 1} - ${currentBlock} в ${network}`);
+          
+          // Проверяем каждый новый блок
+          for (let blockNum = lastChecked + 1; blockNum <= currentBlock; blockNum++) {
+            const block = await provider.getBlock(blockNum, true);
+            
             if (!block || !block.transactions) continue;
             
-            for (const tx of block.transactions) {
-              if (tx.from?.toLowerCase() === address.toLowerCase() ||
-                  tx.to?.toLowerCase() === address.toLowerCase()) {
+            // Проверяем каждую транзакцию в блоке
+            for (const txHash of block.transactions) {
+              const tx = await provider.getTransaction(txHash);
+              if (!tx) continue;
+              
+              const fromMatch = tx.from?.toLowerCase() === walletAddress.toLowerCase();
+              const toMatch = tx.to?.toLowerCase() === walletAddress.toLowerCase();
+              
+              if (fromMatch || toMatch) {
+                console.log(`🎯 Найдена новая транзакция: ${txHash}`);
                 
-                const fee = await getTransactionFee(tx.hash, network);
-                const value = ethers.formatEther(tx.value || 0);
-                const type = tx.from?.toLowerCase() === address.toLowerCase() ? 'sent' : 'received';
+                // Получаем детали транзакции
+                const receipt = await provider.getTransactionReceipt(txHash);
+                if (!receipt) continue;
+                
+                const gasUsed = receipt.gasUsed;
+                const gasPrice = tx.gasPrice || 0n;
+                const fee = ethers.formatEther(gasUsed * gasPrice);
+                const value = ethers.formatEther(tx.value || 0n);
                 
                 const txData = {
                   hash: tx.hash,
@@ -161,66 +232,128 @@ async function monitorWallet(address, network, agent, userAddress) {
                   value: value,
                   fee: fee,
                   network: network,
+                  networkName: config.name,
                   timestamp: Date.now(),
-                  type: type
+                  blockNumber: receipt.blockNumber,
+                  type: fromMatch ? 'sent' : 'received',
+                  currency: config.nativeCurrency,
+                  gasUsed: gasUsed.toString(),
+                  gasPrice: ethers.formatUnits(gasPrice, 'gwei')
                 };
                 
+                // Добавляем в историю
                 user.transactions.push(txData);
                 
-                // Отправляем уведомление
-                const message = `🔔 Новая транзакция обнаружена!\n\n` +
-                  `Сеть: ${NETWORKS[network].name}\n` +
-                  `Тип: ${type === 'sent' ? '📤 Отправлено' : '📥 Получено'}\n` +
-                  `Сумма: ${value} ETH\n` +
-                  `Комиссия: ${fee} ETH\n` +
-                  `От: ${tx.from?.slice(0, 10)}...\n` +
-                  `Кому: ${tx.to?.slice(0, 10)}...\n` +
-                  `Hash: ${tx.hash}\n` +
-                  `Explorer: ${NETWORKS[network].explorer}/tx/${tx.hash}`;
-                
-                // Здесь нужно отправить сообщение пользователю
-                console.log(`Уведомление для ${userAddress}: ${message}`);
+                // Отправляем уведомление пользователю
+                await sendTransactionNotification(userAddress, txData);
               }
             }
           }
-          lastBlock = currentBlock;
+          
+          user.lastCheckedBlock[network] = currentBlock;
         }
+        
       } catch (error) {
-        console.error(`Ошибка мониторинга ${network}:`, error);
+        console.error(`❌ Ошибка мониторинга блока в ${network}:`, error.message);
       }
-    }, 15000); // Проверка каждые 15 секунд
+    }, 12000); // Каждые 12 секунд
+    
+    // Сохраняем ID интервала
+    const key = `${userAddress}-${walletAddress}-${network}`;
+    if (!monitoringIntervals.has(key)) {
+      monitoringIntervals.set(key, []);
+    }
+    monitoringIntervals.get(key).push(intervalId);
     
   } catch (error) {
-    console.error(`Ошибка запуска мониторинга для ${network}:`, error);
+    console.error(`❌ Ошибка запуска мониторинга ${network}:`, error.message);
   }
 }
 
-// Функция расчета статистики
+// Отправка уведомления о транзакции
+async function sendTransactionNotification(userAddress, tx) {
+  if (!agentInstance) return;
+  
+  try {
+    const emoji = tx.type === 'sent' ? '📤' : '📥';
+    const typeText = tx.type === 'sent' ? 'Отправлено' : 'Получено';
+    
+    const message = 
+      `🔔 НОВАЯ ТРАНЗАКЦИЯ ОБНАРУЖЕНА!\n\n` +
+      `${emoji} Тип: ${typeText}\n` +
+      `🌐 Сеть: ${tx.networkName}\n` +
+      `💰 Сумма: ${tx.value} ${tx.currency}\n` +
+      `⛽ Комиссия: ${tx.fee} ${tx.currency}\n` +
+      `⚡ Gas Used: ${tx.gasUsed}\n` +
+      `💵 Gas Price: ${tx.gasPrice} Gwei\n\n` +
+      `📍 От: ${tx.from}\n` +
+      `📍 Кому: ${tx.to}\n\n` +
+      `🔗 Просмотреть:\n${NETWORKS[tx.network].explorer}/tx/${tx.hash}`;
+    
+    // Отправляем сообщение через агента
+    const conversations = await agentInstance.client.conversations.list();
+    const conversation = conversations.find(c => 
+      c.peerAddress.toLowerCase() === userAddress.toLowerCase()
+    );
+    
+    if (conversation) {
+      await conversation.send(message);
+      console.log(`✅ Уведомление отправлено пользователю ${userAddress}`);
+    }
+    
+  } catch (error) {
+    console.error('❌ Ошибка отправки уведомления:', error.message);
+  }
+}
+
+// Получение баланса
+async function getBalance(address, network) {
+  try {
+    const provider = providers[network];
+    const balance = await provider.getBalance(address);
+    return ethers.formatEther(balance);
+  } catch (error) {
+    console.error(`Ошибка получения баланса для ${network}:`, error.message);
+    return '0';
+  }
+}
+
+// Расчет статистики
 function calculateStats(transactions, period) {
   const now = Date.now();
   let startTime;
   
-  switch (period) {
+  const monthNames = {
+    'january': 0, 'february': 1, 'march': 2, 'april': 3,
+    'may': 4, 'june': 5, 'july': 6, 'august': 7,
+    'september': 8, 'october': 9, 'november': 10, 'december': 11
+  };
+  
+  if (monthNames[period.toLowerCase()] !== undefined) {
+    const currentDate = new Date();
+    const targetMonth = monthNames[period.toLowerCase()];
+    const targetYear = targetMonth > currentDate.getMonth() ? 
+      currentDate.getFullYear() - 1 : currentDate.getFullYear();
+    
+    const startDate = new Date(targetYear, targetMonth, 1);
+    const endDate = new Date(targetYear, targetMonth + 1, 0, 23, 59, 59);
+    startTime = startDate.getTime();
+    
+    const filtered = transactions.filter(tx => 
+      tx.timestamp >= startTime && tx.timestamp <= endDate.getTime()
+    );
+    
+    return computeStats(filtered, period);
+  }
+  
+  switch (period.toLowerCase()) {
     case 'today':
-      startTime = now - 24 * 60 * 60 * 1000;
+      startTime = new Date().setHours(0, 0, 0, 0);
       break;
     case 'week':
       startTime = now - 7 * 24 * 60 * 60 * 1000;
       break;
     case 'month':
-    case 'september':
-    case 'october':
-    case 'november':
-    case 'december':
-    case 'january':
-    case 'february':
-    case 'march':
-    case 'april':
-    case 'may':
-    case 'june':
-    case 'july':
-    case 'august':
-      // Упрощенный расчет для месяца
       startTime = now - 30 * 24 * 60 * 60 * 1000;
       break;
     case 'year':
@@ -231,12 +364,15 @@ function calculateStats(transactions, period) {
   }
   
   const filtered = transactions.filter(tx => tx.timestamp >= startTime);
-  
+  return computeStats(filtered, period);
+}
+
+function computeStats(transactions, period) {
   let totalReceived = 0;
   let totalSent = 0;
   let totalFees = 0;
   
-  filtered.forEach(tx => {
+  transactions.forEach(tx => {
     const value = parseFloat(tx.value);
     const fee = parseFloat(tx.fee);
     
@@ -244,13 +380,13 @@ function calculateStats(transactions, period) {
       totalReceived += value;
     } else {
       totalSent += value;
+      totalFees += fee;
     }
-    totalFees += fee;
   });
   
   return {
     period,
-    transactions: filtered.length,
+    transactions: transactions.length,
     received: totalReceived.toFixed(6),
     sent: totalSent.toFixed(6),
     fees: totalFees.toFixed(6),
@@ -263,118 +399,143 @@ const agent = await Agent.createFromEnv({
   env: 'dev',
 });
 
-// Обработка текстовых сообщений
+agentInstance = agent;
+
+// Обработка сообщений
 agent.on('text', async (ctx) => {
   const message = ctx.message.content.trim();
   const userAddr = ctx.message.senderAddress;
   const user = getUserData(userAddr);
   
-  // Команда /start
+  // /start
   if (message.toLowerCase().startsWith('/start') || message.toLowerCase().includes('привет')) {
     await ctx.sendText(
-      '👋 Привет! Я агент для отслеживания транзакций и комиссий.\n\n' +
-      '📝 Доступные команды:\n' +
-      '/add <адрес> - Добавить кошелек для отслеживания\n' +
-      '/wallets - Показать ваши кошельки\n' +
+      '👋 Привет! Я Transaction Tracker Agent!\n\n' +
+      '🎯 Я отслеживаю ваши транзакции в реальном времени и веду учет комиссий.\n\n' +
+      '📝 Команды:\n' +
+      '/add <адрес> - Добавить кошелек\n' +
+      '/wallets - Мои кошельки\n' +
       '/balance - Проверить балансы\n' +
-      '/stats <период> - Статистика (today/week/month/year)\n' +
+      '/stats <период> - Статистика\n' +
       '/history - История транзакций\n' +
-      '/help - Помощь\n\n' +
-      'Начните с добавления вашего кошелька:\n' +
-      '/add 0xYourAddress'
+      '/help - Подробная помощь\n\n' +
+      '🌐 Поддерживаю: Ethereum, Sepolia, Polygon, Arbitrum, Optimism, Base\n\n' +
+      '💡 Начните с: /add 0xВашАдрес'
     );
     return;
   }
   
-  // Команда /help
+  // /help
   if (message.toLowerCase().startsWith('/help')) {
     await ctx.sendText(
-      '📚 Подробная помощь:\n\n' +
-      '1️⃣ /add <адрес> - Добавить EVM кошелек\n' +
-      '   Пример: /add 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb\n\n' +
-      '2️⃣ /wallets - Список отслеживаемых кошельков\n\n' +
-      '3️⃣ /balance - Балансы во всех сетях\n\n' +
-      '4️⃣ /stats <период> - Статистика за период\n' +
-      '   Периоды: today, week, month, september, year\n' +
-      '   Пример: /stats month\n\n' +
-      '5️⃣ /history - Последние транзакции\n\n' +
-      'Поддерживаемые сети:\n' +
-      '• Ethereum • Sepolia • Polygon\n' +
-      '• Arbitrum • Optimism • Base'
+      '📚 ПОДРОБНАЯ ПОМОЩЬ\n\n' +
+      '1️⃣ /add <адрес>\n' +
+      'Добавляет кошелек и загружает историю транзакций\n' +
+      'Пример: /add 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb\n\n' +
+      '2️⃣ /wallets\n' +
+      'Показывает все отслеживаемые кошельки\n\n' +
+      '3️⃣ /balance\n' +
+      'Проверяет балансы во всех сетях\n\n' +
+      '4️⃣ /stats <период>\n' +
+      'Показывает статистику за период\n' +
+      'Периоды: today, week, month, year\n' +
+      'Или: september, october, november и т.д.\n' +
+      'Пример: /stats september\n\n' +
+      '5️⃣ /history\n' +
+      'Последние 10 транзакций\n\n' +
+      '🔔 Уведомления:\n' +
+      'Я автоматически уведомлю вас о КАЖДОЙ новой транзакции с деталями!'
     );
     return;
   }
   
-  // Команда /add
+  // /add
   if (message.toLowerCase().startsWith('/add')) {
     const parts = message.split(' ');
     if (parts.length < 2) {
-      await ctx.sendText('❌ Укажите адрес кошелька:\n/add 0xYourAddress');
+      await ctx.sendText('❌ Укажите адрес:\n/add 0xYourAddress');
       return;
     }
     
     const address = parts[1].trim();
     if (!isValidAddress(address)) {
-      await ctx.sendText('❌ Некорректный адрес кошелька. Проверьте формат.');
+      await ctx.sendText('❌ Некорректный адрес кошелька!');
       return;
     }
     
     if (user.wallets.includes(address.toLowerCase())) {
-      await ctx.sendText('ℹ️ Этот кошелек уже отслеживается.');
+      await ctx.sendText('ℹ️ Этот кошелек уже отслеживается!');
       return;
     }
     
-    user.wallets.push(address.toLowerCase());
-    user.monitoring = true;
+    await ctx.sendText('⏳ Добавляю кошелек и загружаю историю транзакций...\nЭто может занять минуту.');
     
-    // Запускаем мониторинг для всех сетей
+    user.wallets.push(address.toLowerCase());
+    
+    // Загружаем историю транзакций из всех сетей
+    let totalTxCount = 0;
     for (const network of Object.keys(NETWORKS)) {
-      monitorWallet(address.toLowerCase(), network, agent, userAddr);
+      const txHistory = await fetchTransactionHistory(address, network);
+      user.transactions.push(...txHistory);
+      totalTxCount += txHistory.length;
+      
+      // Запускаем мониторинг в реальном времени
+      monitorWalletRealtime(address.toLowerCase(), network, userAddr);
     }
+    
+    user.monitoring = true;
     
     await ctx.sendText(
       `✅ Кошелек добавлен!\n\n` +
       `📍 Адрес: ${address}\n` +
+      `📊 Загружено транзакций: ${totalTxCount}\n` +
       `🔍 Мониторинг запущен во всех сетях\n\n` +
-      `Вы будете получать уведомления о новых транзакциях!`
+      `🔔 Теперь вы будете получать уведомления о КАЖДОЙ новой транзакции!\n\n` +
+      `Используйте:\n` +
+      `/history - посмотреть историю\n` +
+      `/stats month - статистику`
     );
     return;
   }
   
-  // Команда /wallets
+  // /wallets
   if (message.toLowerCase().startsWith('/wallets')) {
     if (user.wallets.length === 0) {
-      await ctx.sendText('📭 У вас нет отслеживаемых кошельков.\n\nДобавьте кошелек: /add 0xYourAddress');
+      await ctx.sendText('📭 Нет отслеживаемых кошельков.\n\n/add 0xYourAddress');
       return;
     }
     
-    let response = '💼 Ваши кошельки:\n\n';
-    user.wallets.forEach((wallet, index) => {
-      response += `${index + 1}. ${wallet}\n`;
+    let response = '💼 Отслеживаемые кошельки:\n\n';
+    user.wallets.forEach((wallet, i) => {
+      response += `${i + 1}. ${wallet}\n`;
     });
-    response += '\n🔍 Мониторинг: ' + (user.monitoring ? '✅ Активен' : '❌ Неактивен');
+    response += `\n🔍 Мониторинг: ${user.monitoring ? '✅ Активен' : '❌ Неактивен'}`;
+    response += `\n📊 Транзакций в базе: ${user.transactions.length}`;
     
     await ctx.sendText(response);
     return;
   }
   
-  // Команда /balance
+  // /balance
   if (message.toLowerCase().startsWith('/balance')) {
     if (user.wallets.length === 0) {
-      await ctx.sendText('📭 Добавьте кошелек для проверки баланса: /add 0xYourAddress');
+      await ctx.sendText('📭 Добавьте кошелек: /add 0xYourAddress');
       return;
     }
     
     await ctx.sendText('⏳ Получаю балансы...');
     
-    let response = '💰 Балансы кошельков:\n\n';
+    let response = '💰 БАЛАНСЫ:\n\n';
     
     for (const wallet of user.wallets) {
-      response += `📍 ${wallet.slice(0, 10)}...${wallet.slice(-8)}\n`;
+      response += `📍 ${wallet.slice(0, 6)}...${wallet.slice(-4)}\n`;
       
       for (const [key, config] of Object.entries(NETWORKS)) {
         const balance = await getBalance(wallet, key);
-        response += `  ${config.name}: ${parseFloat(balance).toFixed(4)} ETH\n`;
+        const bal = parseFloat(balance);
+        if (bal > 0) {
+          response += `  ${config.name}: ${bal.toFixed(6)} ${config.nativeCurrency}\n`;
+        }
       }
       response += '\n';
     }
@@ -383,10 +544,10 @@ agent.on('text', async (ctx) => {
     return;
   }
   
-  // Команда /stats
+  // /stats
   if (message.toLowerCase().startsWith('/stats')) {
     if (user.transactions.length === 0) {
-      await ctx.sendText('📊 Нет данных о транзакциях.\n\nДобавьте кошелек и дождитесь транзакций: /add 0xYourAddress');
+      await ctx.sendText('📊 Нет данных.\n\nДобавьте кошелек: /add 0xYourAddress');
       return;
     }
     
@@ -395,59 +556,61 @@ agent.on('text', async (ctx) => {
     
     const stats = calculateStats(user.transactions, period);
     
-    const response = `📊 Статистика за ${period}:\n\n` +
+    const response = 
+      `📊 СТАТИСТИКА ЗА ${period.toUpperCase()}\n\n` +
       `📈 Транзакций: ${stats.transactions}\n` +
       `📥 Получено: ${stats.received} ETH\n` +
       `📤 Отправлено: ${stats.sent} ETH\n` +
       `⛽ Комиссии: ${stats.fees} ETH\n` +
-      `💵 Чистое изменение: ${stats.netChange} ETH\n\n` +
+      `💵 Чистое: ${stats.netChange} ETH\n\n` +
       `${parseFloat(stats.netChange) >= 0 ? '✅ Прибыль' : '⚠️ Убыток'}`;
     
     await ctx.sendText(response);
     return;
   }
   
-  // Команда /history
+  // /history
   if (message.toLowerCase().startsWith('/history')) {
     if (user.transactions.length === 0) {
-      await ctx.sendText('📜 История транзакций пуста.\n\nДобавьте кошелек: /add 0xYourAddress');
+      await ctx.sendText('📜 История пуста.\n\nДобавьте кошелек: /add 0xYourAddress');
       return;
     }
     
-    const recent = user.transactions.slice(-5).reverse();
-    let response = '📜 Последние транзакции:\n\n';
+    const recent = user.transactions
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, 10);
     
-    recent.forEach((tx, index) => {
-      response += `${index + 1}. ${tx.type === 'sent' ? '📤' : '📥'} ${NETWORKS[tx.network].name}\n` +
-        `   Сумма: ${tx.value} ETH\n` +
-        `   Комиссия: ${tx.fee} ETH\n` +
-        `   Hash: ${tx.hash.slice(0, 10)}...\n\n`;
+    let response = `📜 ПОСЛЕДНИЕ ${recent.length} ТРАНЗАКЦИЙ:\n\n`;
+    
+    recent.forEach((tx, i) => {
+      const emoji = tx.type === 'sent' ? '📤' : '📥';
+      const date = new Date(tx.timestamp).toLocaleString('ru-RU');
+      
+      response += 
+        `${i + 1}. ${emoji} ${tx.networkName}\n` +
+        `   ${tx.value} ${tx.currency}\n` +
+        `   Комиссия: ${tx.fee} ${tx.currency}\n` +
+        `   ${date}\n` +
+        `   ${NETWORKS[tx.network].explorer}/tx/${tx.hash}\n\n`;
     });
     
     await ctx.sendText(response);
     return;
   }
   
-  // Неизвестная команда
-  await ctx.sendText(
-    '❓ Неизвестная команда.\n\n' +
-    'Используйте /help для списка команд.'
-  );
+  await ctx.sendText('❓ Неизвестная команда. Используйте /help');
 });
 
-// Логируем запуск агента
 agent.on('start', () => {
-  console.log('🚀 Transaction Tracker Agent запущен!');
-  console.log(`📬 Адрес агента: ${agent.address}`);
-  console.log(`🔗 Тестовая ссылка: ${getTestUrl(agent.client)}`);
-  console.log('⏳ Ожидаю сообщений...');
-  console.log(`🌐 Поддерживаемые сети: ${Object.keys(NETWORKS).join(', ')}`);
+  console.log('🚀 Transaction Tracker Agent ЗАПУЩЕН!');
+  console.log(`📬 Адрес: ${agent.address}`);
+  console.log(`🔗 Тест: ${getTestUrl(agent.client)}`);
+  console.log(`🌐 Сети: ${Object.keys(NETWORKS).join(', ')}`);
+  console.log('⏳ Жду сообщений...');
 });
 
-// Обработка ошибок
 agent.on('error', (error) => {
-  console.error('❌ Ошибка агента:', error);
+  console.error('❌ Ошибка:', error);
 });
 
-// Запускаем агента
 await agent.start();
