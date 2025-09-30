@@ -6,10 +6,12 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "dev": "node index.js"
+    "dev": "node index.js",
+    "generate-key": "node generate-key.js"
   },
   "dependencies": {
-    "@xmtp/agent-sdk": "latest"
+    "@xmtp/agent-sdk": "latest",
+    "ethers": "^6.13.4"
   },
   "engines": {
     "node": ">=18.0.0"
