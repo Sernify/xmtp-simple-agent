@@ -75,7 +75,7 @@ XMTP_DB_ENCRYPTION_KEY=your_64_character_hex_key_here
 XMTP_ENV=dev
 
 # Alchemy API Key
-ALCHEMY_API_KEY=mRihUxWF22AZILcoI3b3V
+ALCHEMY_API_KEY=
 ```
 
 ### 3. Get Your Private Key
